@@ -98,6 +98,7 @@ class RunnerBase:
 
     @property
     def optimizer(self):
+        # 调用self.optimizer时创建
         # TODO make optimizer class and configurations
         if self._optimizer is None:
             lr_scale = self.config.run_cfg.get("lr_layer_decay", 1)
@@ -358,7 +359,7 @@ class RunnerBase:
 
         for cur_epoch in range(self.start_epoch, self.max_epoch):
             # training phase
-            if not self.evaluate_only:
+            if not self.evaluate_only:  # True
                 logging.info("Start training")
                 # See https://github.com/salesforce/LAVIS/issues/449
                 # if cur_epoch == self.start_epoch:
@@ -392,7 +393,7 @@ class RunnerBase:
                             val_log.update({"best_epoch": best_epoch})
                             self.log_stats(val_log, split_name)
 
-            else:
+            else: # True
                 # if no validation split is provided, we just save the checkpoint at the end of each epoch.
                 if not self.evaluate_only:
                     self._save_checkpoint(cur_epoch, is_best=False)

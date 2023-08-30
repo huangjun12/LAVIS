@@ -201,6 +201,7 @@ class PatchEmbed(nn.Module):
         assert H == self.img_size[0] and W == self.img_size[1], \
             f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
         x = self.proj(x).flatten(2).transpose(1, 2)
+        # [100, 3, 224, 224], [100, 1408, 16, 16], [100, 1408, 256], [100, 256, 1408]
         return x
 
 
@@ -273,7 +274,9 @@ class VisionTransformer(nn.Module):
             self.rel_pos_bias = None
         self.use_checkpoint = use_checkpoint
         
+        # all 0.
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+
         self.use_rel_pos_bias = use_rel_pos_bias
         self.blocks = nn.ModuleList([
             Block(
@@ -443,7 +446,8 @@ def create_eva_vit_g(img_size=224,drop_path_rate=0.4,use_checkpoint=False,precis
     cached_file = download_cached_file(
         url, check_hash=False, progress=True
     )
-    state_dict = torch.load(cached_file, map_location="cpu")    
+    #cached_file = '~/.cache/torch/hub/checkpoints/eva_vit_g.pth'
+    state_dict = torch.load(cached_file, map_location="cpu") 
     interpolate_pos_embed(model,state_dict)
     
     incompatible_keys = model.load_state_dict(state_dict, strict=False)

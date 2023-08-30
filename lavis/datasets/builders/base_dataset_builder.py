@@ -68,7 +68,7 @@ class BaseDatasetBuilder:
             vis_eval_cfg = vis_proc_cfg.get("eval")
 
             self.vis_processors["train"] = self._build_proc_from_cfg(vis_train_cfg)
-            self.vis_processors["eval"] = self._build_proc_from_cfg(vis_eval_cfg)
+            self.vis_processors["eval"] = self._build_proc_from_cfg(vis_eval_cfg) #None
 
         if txt_proc_cfg is not None:
             txt_train_cfg = txt_proc_cfg.get("train")
@@ -95,6 +95,7 @@ class BaseDatasetBuilder:
         return utils.get_abs_path(cls.DATASET_CONFIG_DICT[type])
 
     def _download_data(self):
+        # anno会自动下，但图像需要提前下
         self._download_ann()
         self._download_vis()
 
@@ -113,6 +114,8 @@ class BaseDatasetBuilder:
 
         splits = anns.keys()
 
+        # 在LAVIS/lavis/__init__.py中通过调用默认配置文件LAVIS/lavis/configs/default.yaml中的
+        # envs.cache_root指定
         cache_root = registry.get_path("cache_root")
 
         for split in splits:
@@ -142,7 +145,7 @@ class BaseDatasetBuilder:
                         shutil.copyfile(src=src, dst=dst)
                     else:
                         logging.info("Using existing file {}.".format(dst))
-                else:
+                else:  # True
                     if os.path.isdir(storage_path):
                         # if only dirname is provided, suffix with basename of URL.
                         raise ValueError(
@@ -150,9 +153,10 @@ class BaseDatasetBuilder:
                                 storage_path
                             )
                         )
-                    else:
+                    else: # True
                         filename = os.path.basename(storage_path)
 
+                    # 如果文件已存在，会提示避免重复下载
                     download_url(url=url_or_filename, root=dirname, filename=filename)
 
     def _download_vis(self):

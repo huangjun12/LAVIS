@@ -55,9 +55,9 @@ def is_main_process():
 
 
 def init_distributed_mode(args):
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        args.rank = int(os.environ["RANK"])
-        args.world_size = int(os.environ["WORLD_SIZE"])
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ: # True
+        args.rank = int(os.environ["RANK"]) #0
+        args.world_size = int(os.environ["WORLD_SIZE"]) #1
         args.gpu = int(os.environ["LOCAL_RANK"])
     elif "SLURM_PROCID" in os.environ:
         args.rank = int(os.environ["SLURM_PROCID"])
@@ -86,7 +86,7 @@ def init_distributed_mode(args):
             days=365
         ),  # allow auto-downloading and de-compressing
     )
-    torch.distributed.barrier()
+    torch.distributed.barrier() #不同进程间数据同步
     setup_for_distributed(args.rank == 0)
 
 

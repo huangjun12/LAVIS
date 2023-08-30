@@ -20,6 +20,7 @@ class BaseDataset(Dataset):
         vis_root (string): Root directory of images (e.g. coco/images/)
         ann_root (string): directory to store the annotation file
         """
+
         self.vis_root = vis_root
 
         self.annotation = []

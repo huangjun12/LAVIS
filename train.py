@@ -47,7 +47,6 @@ def parse_args():
     args = parser.parse_args()
     # if 'LOCAL_RANK' not in os.environ:
     #     os.environ['LOCAL_RANK'] = str(args.local_rank)
-
     return args
 
 
@@ -78,8 +77,10 @@ def main():
     # set before init_distributed_mode() to ensure the same job_id shared across all ranks.
     job_id = now()
 
+    # 根据配置文件，将各项配置build成dict
     cfg = Config(parse_args())
-
+    
+    # DDP初始化相关
     init_distributed_mode(cfg.run_cfg)
 
     setup_seeds(cfg)
@@ -89,8 +90,9 @@ def main():
 
     cfg.pretty_print()
 
-    task = tasks.setup_task(cfg)
+    task = tasks.setup_task(cfg) # 返回task对应的实例
     datasets = task.build_datasets(cfg)
+
     model = task.build_model(cfg)
 
     runner = get_runner_class(cfg)(

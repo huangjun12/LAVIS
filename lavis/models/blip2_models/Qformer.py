@@ -100,7 +100,7 @@ class BertEmbeddings(nn.Module):
 
             if query_embeds is not None:
                 embeddings = torch.cat((query_embeds, embeddings), dim=1)
-        else:
+        else: # True
             embeddings = query_embeds
 
         embeddings = self.LayerNorm(embeddings)
@@ -182,6 +182,7 @@ class BertSelfAttention(nn.Module):
         # such that the encoder's padding tokens are not attended to.
         is_cross_attention = encoder_hidden_states is not None
 
+        #  这里加了cross attention的计算
         if is_cross_attention:
             key_layer = self.transpose_for_scores(self.key(encoder_hidden_states))
             value_layer = self.transpose_for_scores(self.value(encoder_hidden_states))
@@ -414,6 +415,7 @@ class BertLayer(nn.Module):
         self_attn_past_key_value = (
             past_key_value[:2] if past_key_value is not None else None
         )
+
         self_attention_outputs = self.attention(
             hidden_states,
             attention_mask,
@@ -421,13 +423,14 @@ class BertLayer(nn.Module):
             output_attentions=output_attentions,
             past_key_value=self_attn_past_key_value,
         )
-        attention_output = self_attention_outputs[0]
-        outputs = self_attention_outputs[1:-1]
 
-        present_key_value = self_attention_outputs[-1]
+        attention_output = self_attention_outputs[0] #输入经过self-att之后的输出, [100, 32, 768]
+        outputs = self_attention_outputs[1:-1] # output-attention为false的话，这里length为0
+        present_key_value = self_attention_outputs[-1] # 算self-att暂存的key和value
 
         if query_length > 0:
             query_attention_output = attention_output[:, :query_length, :]
+            # [100, 32, 768]  --> [100, 32, 768]
 
             if self.has_cross_attention:
                 assert (
@@ -441,18 +444,21 @@ class BertLayer(nn.Module):
                     encoder_attention_mask,
                     output_attentions=output_attentions,
                 )
-                query_attention_output = cross_attention_outputs[0]
+                query_attention_output = cross_attention_outputs[0] #[100, 32, 768]
+
                 outputs = (
                     outputs + cross_attention_outputs[1:-1]
                 )  # add cross attentions if we output attention weights
+                # self-att和cross-att的key和value
 
             layer_output = apply_chunking_to_forward(
                 self.feed_forward_chunk_query,
                 self.chunk_size_feed_forward,
                 self.seq_len_dim,
                 query_attention_output,
-            )
-            if attention_output.shape[1] > query_length:
+            ) #[100, 32, 768]
+
+            if attention_output.shape[1] > query_length: #False
                 layer_output_text = apply_chunking_to_forward(
                     self.feed_forward_chunk,
                     self.chunk_size_feed_forward,
@@ -467,9 +473,11 @@ class BertLayer(nn.Module):
                 self.seq_len_dim,
                 attention_output,
             )
-        outputs = (layer_output,) + outputs
+        outputs = (layer_output,) + outputs #outputs的length为0
 
         outputs = outputs + (present_key_value,)
+        # 输入经过self-att和cross-att的输出
+        # 算self-att时保存的key和value: use-cache为True用来做kv缓存的？
 
         return outputs
 
@@ -506,24 +514,23 @@ class BertEncoder(nn.Module):
         return_dict=True,
         query_length=0,
     ):
-        all_hidden_states = () if output_hidden_states else None
-        all_self_attentions = () if output_attentions else None
+        all_hidden_states = () if output_hidden_states else None #None
+        all_self_attentions = () if output_attentions else None #None
         all_cross_attentions = (
             () if output_attentions and self.config.add_cross_attention else None
-        )
+        ) #True, (())
 
-        next_decoder_cache = () if use_cache else None
+        next_decoder_cache = () if use_cache else None # None
 
         for i in range(self.config.num_hidden_layers):
             layer_module = self.layer[i]
-            if output_hidden_states:
+            if output_hidden_states: #False
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
             layer_head_mask = head_mask[i] if head_mask is not None else None
             past_key_value = past_key_values[i] if past_key_values is not None else None
 
             if getattr(self.config, "gradient_checkpointing", False) and self.training:
-
                 if use_cache:
                     logger.warn(
                         "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
@@ -546,7 +553,7 @@ class BertEncoder(nn.Module):
                     encoder_hidden_states,
                     encoder_attention_mask,
                 )
-            else:
+            else: #True
                 layer_outputs = layer_module(
                     hidden_states,
                     attention_mask,
@@ -580,8 +587,9 @@ class BertEncoder(nn.Module):
                 ]
                 if v is not None
             )
+
         return BaseModelOutputWithPastAndCrossAttentions(
-            last_hidden_state=hidden_states,
+            last_hidden_state=hidden_states, #[100, 32, 768]
             past_key_values=next_decoder_cache,
             hidden_states=all_hidden_states,
             attentions=all_self_attentions,
@@ -839,12 +847,14 @@ class BertModel(BertPreTrainedModel):
             output_attentions
             if output_attentions is not None
             else self.config.output_attentions
-        )
+        ) # False
+
         output_hidden_states = (
             output_hidden_states
             if output_hidden_states is not None
             else self.config.output_hidden_states
-        )
+        ) #False
+
         return_dict = (
             return_dict if return_dict is not None else self.config.use_return_dict
         )
@@ -861,29 +871,31 @@ class BertModel(BertPreTrainedModel):
             past_key_values[0][0].shape[2] - self.config.query_length
             if past_key_values is not None
             else 0
-        )
+        ) #0        
 
         query_length = query_embeds.shape[1] if query_embeds is not None else 0
+        # 32
 
+        # 就是将输入的query token过了norm和drop，得到输入embedding
         embedding_output = self.embeddings(
             input_ids=input_ids,
             position_ids=position_ids,
             query_embeds=query_embeds,
             past_key_values_length=past_key_values_length,
-        )
+        ) # [100, 32, 768]
 
         input_shape = embedding_output.size()[:-1]
         batch_size, seq_length = input_shape
         device = embedding_output.device
 
-        if attention_mask is None:
+        if attention_mask is None: #True
             attention_mask = torch.ones(
                 ((batch_size, seq_length + past_key_values_length)), device=device
             )
 
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
-        if is_decoder:
+        if is_decoder: #False
             extended_attention_mask = self.get_extended_attention_mask(
                 attention_mask,
                 input_ids.shape,
@@ -903,12 +915,12 @@ class BertModel(BertPreTrainedModel):
                 encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states[
                     0
                 ].size()
-            else:
+            else:                
                 (
                     encoder_batch_size,
                     encoder_sequence_length,
                     _,
-                ) = encoder_hidden_states.size()
+                ) = encoder_hidden_states.size() # [100, 257, 1408]
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
 
             if type(encoder_attention_mask) == list:
@@ -920,7 +932,8 @@ class BertModel(BertPreTrainedModel):
                 encoder_extended_attention_mask = self.invert_attention_mask(
                     encoder_attention_mask
                 )
-            else:
+            else: # True
+                # 0.和1.互相交换
                 encoder_extended_attention_mask = self.invert_attention_mask(
                     encoder_attention_mask
                 )
@@ -934,34 +947,43 @@ class BertModel(BertPreTrainedModel):
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
+        # print(embedding_output.shape) 
+        # print(extended_attention_mask.shape)
+        # print(len(head_mask))
+        # print(encoder_hidden_states.shape)
+        # print(encoder_extended_attention_mask.shape)
+
         encoder_outputs = self.encoder(
-            embedding_output,
-            attention_mask=extended_attention_mask,
-            head_mask=head_mask,
-            encoder_hidden_states=encoder_hidden_states,
-            encoder_attention_mask=encoder_extended_attention_mask,
+            embedding_output, #[100, 32, 768]
+            attention_mask=extended_attention_mask, #[100, 1, 1, 32]
+            head_mask=head_mask, #12
+            encoder_hidden_states=encoder_hidden_states, # [100, 257, 1408]
+            encoder_attention_mask=encoder_extended_attention_mask, # [100, 1, 1, 257]
             past_key_values=past_key_values,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            query_length=query_length,
+            query_length=query_length, # 32
         )
-        sequence_output = encoder_outputs[0]
+
+        sequence_output = encoder_outputs[0] # [100, 32, 768] 等同于encoder_outputs.last_hidden_state
+
         pooled_output = (
             self.pooler(sequence_output) if self.pooler is not None else None
-        )
+        ) # None
 
         if not return_dict:
             return (sequence_output, pooled_output) + encoder_outputs[1:]
 
+        #相当于用字典把输出组织了起来
         return BaseModelOutputWithPoolingAndCrossAttentions(
-            last_hidden_state=sequence_output,
-            pooler_output=pooled_output,
-            past_key_values=encoder_outputs.past_key_values,
-            hidden_states=encoder_outputs.hidden_states,
-            attentions=encoder_outputs.attentions,
-            cross_attentions=encoder_outputs.cross_attentions,
+            last_hidden_state=sequence_output, #输入经过self-att和cross-att的输出
+            pooler_output=pooled_output, #如果有pool层这里就是pool层的输出
+            past_key_values=encoder_outputs.past_key_values, #算self-att时缓存的kv
+            hidden_states=encoder_outputs.hidden_states, #None
+            attentions=encoder_outputs.attentions, #None
+            cross_attentions=encoder_outputs.cross_attentions, #None
         )
 
 
@@ -1063,17 +1085,21 @@ class BertLMHeadModel(BertPreTrainedModel):
         if query_embeds is not None:
             sequence_output = outputs[0][:, query_embeds.shape[1] :, :]
 
-        prediction_scores = self.cls(sequence_output)
+        prediction_scores = self.cls(sequence_output) 
+        # [100, 32, 768] --> [100, 32, 30523]
 
-        if return_logits:
+        if return_logits: #False
             return prediction_scores[:, :-1, :].contiguous()
 
         lm_loss = None
-        if labels is not None:
+        if labels is not None: #True
             # we are doing next-token prediction; shift prediction scores and input ids by one
             shifted_prediction_scores = prediction_scores[:, :-1, :].contiguous()
+            # [100, 31, 30523]
             labels = labels[:, 1:].contiguous()
+            # [100, 31]
             loss_fct = CrossEntropyLoss(reduction=reduction, label_smoothing=0.1)
+
             lm_loss = loss_fct(
                 shifted_prediction_scores.view(-1, self.config.vocab_size),
                 labels.view(-1),
@@ -1081,7 +1107,7 @@ class BertLMHeadModel(BertPreTrainedModel):
             if reduction == "none":
                 lm_loss = lm_loss.view(prediction_scores.size(0), -1).sum(1)
 
-        if not return_dict:
+        if not return_dict: #False
             output = (prediction_scores,) + outputs[2:]
             return ((lm_loss,) + output) if lm_loss is not None else output
 

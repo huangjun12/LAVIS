@@ -59,6 +59,7 @@ class Blip2Qformer(Blip2Base):
 
         self.tokenizer = self.init_tokenizer()
 
+        
         self.visual_encoder, self.ln_vision = self.init_vision_encoder(
             vit_model, img_size, drop_path_rate, use_grad_checkpoint, vit_precision
         )
@@ -68,9 +69,12 @@ class Blip2Qformer(Blip2Base):
             self.visual_encoder = self.visual_encoder.eval()
             self.visual_encoder.train = disabled_train
             logging.info("freeze vision encoder")
+
         self.Qformer, self.query_tokens = self.init_Qformer(
             num_query_token, self.visual_encoder.num_features, cross_attention_freq
         )
+
+        # 自适应修改token长度
         self.Qformer.resize_token_embeddings(len(self.tokenizer))
         state_dict = self.Qformer.state_dict()
         for name, param in self.Qformer.named_parameters():
@@ -90,14 +94,20 @@ class Blip2Qformer(Blip2Base):
     def forward(self, samples):
         image = samples["image"]
         text = samples["text_input"]
+        print('==input image and text shape==', len(image), \
+        len(text), image[0].shape, text[0]) # 100,100, [3, 224, 224], str句子
 
-        image_embeds = self.ln_vision(self.visual_encoder(image))
+        image_embeds = self.ln_vision(self.visual_encoder(image)) 
+        # 100, 257, 1408; 257=256(16*16(224/patch_size=14))+1(cls分类token), 1408=embedding size
+        print('==image_embeds.shape===', image_embeds.shape)
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(
             image.device
         )
 
-        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
+        query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1) # [100, 32, 768]
+        print('===query_tokens.shape==', query_tokens.shape)
 
+        # 只跑bert部分的前向
         query_output = self.Qformer.bert(
             query_embeds=query_tokens,
             encoder_hidden_states=image_embeds,
@@ -105,28 +115,39 @@ class Blip2Qformer(Blip2Base):
             use_cache=True,
             return_dict=True,
         )
+        print('===query_output[0].shape===', query_output[0].shape)
 
+        # 改变特征维度，做归一化
         image_feats = F.normalize(
             self.vision_proj(query_output.last_hidden_state), dim=-1
-        )
+        ) # [100, 32, 768]  --> [100, 32, 256]
+        print('===image_feats.shape===', image_feats.shape)
 
         text_tokens = self.tokenizer(
             text,
             padding="max_length",
             truncation=True,
-            max_length=self.max_txt_len,
+            max_length=self.max_txt_len, 
+            # 设置为32, 和Qformer的query长度相同，是特意的？
+            # 应该不是，文本最后也只是取第一维的输出特征
             return_tensors="pt",
         ).to(image.device)
+        print('==text_tokens.shape==', text_tokens.input_ids.shape) #[100, 32]
+
         text_output = self.Qformer.bert(
             text_tokens.input_ids,
             attention_mask=text_tokens.attention_mask,
             return_dict=True,
         )
+        #print('==text_output.shape===', text_output.shape)
         text_feat = F.normalize(
             self.text_proj(text_output.last_hidden_state[:, 0, :]), dim=-1
-        )
+        ) #对于文本，只取了Qformer输出的第0维特征
+        # [100, 32, 768] --> [100, 1, 768] --> [100, 256]
+        print('===text_feat.shape===', text_feat.shape)
 
         ###============== Image-text Contrastive ===================###
+        # 图文对，匹配的相似度高，不匹配的相似度低
         image_feats_all = concat_all_gather(
             image_feats
         )  # [batch_size*num_gpu, num_query_tokens, embed_dim]
@@ -136,18 +157,20 @@ class Blip2Qformer(Blip2Base):
             image_feats.unsqueeze(1), text_feat_all.unsqueeze(-1)
         ).squeeze()
         # [batch_size, batch_size*num_gpu, num_query_tokens]
+        # [100, 1, 32, 256], [100, 256, 1] --> [100, 100, 32, 1] --> [100, 100, 32]
 
         # image-text similarity: aggregate across all query tokens
-        sim_i2t, _ = sim_q2t.max(-1)
+        sim_i2t, _ = sim_q2t.max(-1) #[100, 100]
         sim_i2t = sim_i2t / self.temp
 
         # text-query similarity: [batch_size, batch_size*num_gpu, num_query_tokens]
         sim_t2q = torch.matmul(
             text_feat.unsqueeze(1).unsqueeze(1), image_feats_all.permute(0, 2, 1)
         ).squeeze()
+        #[100, 1, 1, 256], [100, 256, 32] --> [100, 100, 32] 
 
         # text-image similarity: aggregate across all query tokens
-        sim_t2i, _ = sim_t2q.max(-1)
+        sim_t2i, _ = sim_t2q.max(-1) #[100, 100]
         sim_t2i = sim_t2i / self.temp  # [batch_size, batch_size*num_gpu]
 
         rank = dist.get_rank()
@@ -156,7 +179,7 @@ class Blip2Qformer(Blip2Base):
             image.device
         )
 
-        if "image_id" in samples.keys(): #coco retrieval finetuning
+        if "image_id" in samples.keys(): #coco retrieval finetuning #False
             image_ids = samples["image_id"].view(-1,1)
             image_ids_all = concat_all_gather(image_ids)
             pos_idx = torch.eq(image_ids, image_ids_all.t()).float()       
@@ -173,27 +196,29 @@ class Blip2Qformer(Blip2Base):
             ) / 2
 
         ###============== Image-text Matching ===================###
+        # 图文对，是否匹配
         text_input_ids_world = concat_all_gather(text_tokens.input_ids)
         text_attention_mask_world = concat_all_gather(text_tokens.attention_mask)
         image_embeds_world = all_gather_with_grad(image_embeds)
         with torch.no_grad():
-            if "image_id" in samples.keys():
+            if "image_id" in samples.keys(): #False
                 mask = torch.eq(image_ids, image_ids_all.t())
                 sim_t2i.masked_fill_(mask, -10000)
                 sim_i2t.masked_fill_(mask, -10000)
             else:    
-                sim_t2i[:, rank * bs : rank * bs + bs].fill_diagonal_(-10000)
+                sim_t2i[:, rank * bs : rank * bs + bs].fill_diagonal_(-10000) #对角线填充-10000
                 sim_i2t[:, rank * bs : rank * bs + bs].fill_diagonal_(-10000)            
                 
-            weights_t2i = F.softmax(sim_t2i, dim=1)
-            weights_i2t = F.softmax(sim_i2t, dim=1)
+            weights_t2i = F.softmax(sim_t2i, dim=1) # [100, 100]
+            weights_i2t = F.softmax(sim_i2t, dim=1) # [100, 100]
 
         # select a negative image for each text
         image_embeds_neg = []
         for b in range(bs):
+            # 权重越大的图片,越容易被取到，为什么是负样本？不是越相似吗
             neg_idx = torch.multinomial(weights_t2i[b], 1).item()
             image_embeds_neg.append(image_embeds_world[neg_idx])
-        image_embeds_neg = torch.stack(image_embeds_neg, dim=0)
+        image_embeds_neg = torch.stack(image_embeds_neg, dim=0) #[100, 257, 1408]
 
         # select a negative text for each image
         text_ids_neg = []
@@ -203,33 +228,37 @@ class Blip2Qformer(Blip2Base):
             text_ids_neg.append(text_input_ids_world[neg_idx])
             text_atts_neg.append(text_attention_mask_world[neg_idx])
 
-        text_ids_neg = torch.stack(text_ids_neg, dim=0)
+        text_ids_neg = torch.stack(text_ids_neg, dim=0) #[100, 32]
         text_atts_neg = torch.stack(text_atts_neg, dim=0)
 
         text_ids_all = torch.cat(
             [text_tokens.input_ids, text_tokens.input_ids, text_ids_neg], dim=0
-        )  # pos, pos, neg
+        )  # pos, pos, neg #[300, 32]
+
         text_atts_all = torch.cat(
             [text_tokens.attention_mask, text_tokens.attention_mask, text_atts_neg],
             dim=0,
         )
 
-        query_tokens_itm = self.query_tokens.expand(text_ids_all.shape[0], -1, -1)
+        query_tokens_itm = self.query_tokens.expand(text_ids_all.shape[0], -1, -1) 
+        #[300, 32, 768]
         query_atts_itm = torch.ones(query_tokens_itm.size()[:-1], dtype=torch.long).to(
             image.device
         )
         attention_mask_all = torch.cat([query_atts_itm, text_atts_all], dim=1)
+        # [300, 64]
 
         image_embeds_all = torch.cat(
             [image_embeds, image_embeds_neg, image_embeds], dim=0
-        )  # pos, neg, pos
+        )  # pos, neg, pos #[300, 257, 1408]
+
         image_atts_all = torch.ones(image_embeds_all.size()[:-1], dtype=torch.long).to(
             image.device
         )
 
         output_itm = self.Qformer.bert(
             text_ids_all,
-            query_embeds=query_tokens_itm,
+            query_embeds=query_tokens_itm, #query embed和input_id embed会拼接到一起
             attention_mask=attention_mask_all,
             encoder_hidden_states=image_embeds_all,
             encoder_attention_mask=image_atts_all,
@@ -237,21 +266,24 @@ class Blip2Qformer(Blip2Base):
         )
 
         vl_embeddings = output_itm.last_hidden_state[:, : query_tokens_itm.size(1), :]
+        # [300, 64, 768] --> [300, 32, 768]
         vl_output = self.itm_head(vl_embeddings)
+
         logits = vl_output.mean(dim=1)
+        # [300, 32, 2] --> [300, 1, 2]
 
         itm_labels = torch.cat(
             [torch.ones(bs, dtype=torch.long), torch.zeros(2 * bs, dtype=torch.long)],
             dim=0,
-        ).to(image.device)
+        ).to(image.device) #匹配，不匹配，不匹配
         loss_itm = F.cross_entropy(logits, itm_labels)
 
         ##================= Image Captioning ========================##
-        decoder_input_ids = text_tokens.input_ids.clone()
-        decoder_input_ids[:, 0] = self.tokenizer.bos_token_id
+        decoder_input_ids = text_tokens.input_ids.clone() #[100, 32]
+        decoder_input_ids[:, 0] = self.tokenizer.bos_token_id #替换第0个位置的input_id
         labels = decoder_input_ids.masked_fill(
             decoder_input_ids == self.tokenizer.pad_token_id, -100
-        )
+        ) #padding位置label是-100，其它就是input_id [100, 32]
 
         query_atts = torch.ones(query_tokens.size()[:-1], dtype=torch.long).to(
             image.device
@@ -260,7 +292,7 @@ class Blip2Qformer(Blip2Base):
         lm_output = self.Qformer(
             decoder_input_ids,
             attention_mask=attention_mask,
-            past_key_values=query_output.past_key_values,
+            past_key_values=query_output.past_key_values, #利用算query特征时缓存的kv
             return_dict=True,
             labels=labels,
         )

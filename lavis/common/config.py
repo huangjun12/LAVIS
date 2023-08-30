@@ -18,6 +18,7 @@ class Config:
         self.config = {}
 
         self.args = args
+        print(self.args)
 
         # Register the config and configuration for setup
         registry.register("configuration", self)
@@ -68,6 +69,9 @@ class Config:
 
         assert model_type is not None, "Missing model_type."
 
+        # 根据LAVIS/lavis/models/base_model.py
+        # model class的全局字段的PRETRAINED_MODEL_CONFIG_DICT
+        # 利用model_type来获取相应的默认配置文件
         model_config_path = model_cls.default_config_path(model_type=model_type)
 
         model_config = OmegaConf.create()

@@ -46,7 +46,7 @@ class Blip2OPT(Blip2Base):
         drop_path_rate=0,
         use_grad_checkpoint=False,
         vit_precision="fp16",
-        freeze_vit=True,
+        freeze_vit=True,  #都是默认设置
         num_query_token=32,
         opt_model="facebook/opt-2.7b",
         prompt="",
@@ -65,6 +65,7 @@ class Blip2OPT(Blip2Base):
         self.visual_encoder, self.ln_vision = self.init_vision_encoder(
             vit_model, img_size, drop_path_rate, use_grad_checkpoint, vit_precision
         )
+        # 冻结视觉模型
         if freeze_vit:
             for name, param in self.visual_encoder.named_parameters():
                 param.requires_grad = False
@@ -72,6 +73,7 @@ class Blip2OPT(Blip2Base):
             self.visual_encoder.train = disabled_train
             logging.info("freeze vision encoder")
 
+        # 可训练的Qformer
         self.Qformer, self.query_tokens = self.init_Qformer(
             num_query_token, self.visual_encoder.num_features
         )
@@ -82,16 +84,21 @@ class Blip2OPT(Blip2Base):
             layer.output = None
             layer.intermediate = None
 
+        print('Loadding LLM OPT...')
         self.opt_tokenizer = AutoTokenizer.from_pretrained(opt_model, use_fast=False)
         self.opt_model = OPTForCausalLM.from_pretrained(
             opt_model, torch_dtype=torch.float16
         )
+        print('Loaded LLM OPT.')
+        # 冻结LLM
         for name, param in self.opt_model.named_parameters():
             param.requires_grad = False
+
         self.eos_token_id = self.opt_tokenizer(
             "\n", add_special_tokens=False
-        ).input_ids[0]
+        ).input_ids[0] # 50118
 
+        # 可训练的投影fc
         self.opt_proj = nn.Linear(
             self.Qformer.config.hidden_size, self.opt_model.config.hidden_size
         )
@@ -111,6 +118,8 @@ class Blip2OPT(Blip2Base):
         image_atts = torch.ones(image_embeds.size()[:-1], dtype=torch.long).to(
             image.device
         )
+        #print('==image_embeds.shape==', image_embeds.shape) #[10, 257, 1408]
+        # print(image_atts.shape) # [10, 257]
 
         query_tokens = self.query_tokens.expand(image_embeds.shape[0], -1, -1)
         query_output = self.Qformer.bert(
@@ -119,18 +128,23 @@ class Blip2OPT(Blip2Base):
             encoder_attention_mask=image_atts,
             return_dict=True,
         )
+        #print('==query_tokens.shape===', query_tokens.shape) #[10, 32, 768]
+        #print('===query_output.last_hidden_state.shape==', query_output.last_hidden_state.shape) #[10, 32, 768]
 
+        # *用fc将query输出特征做投影
         inputs_opt = self.opt_proj(query_output.last_hidden_state)
         atts_opt = torch.ones(inputs_opt.size()[:-1], dtype=torch.long).to(image.device)
-
+        #print('===inputs_opt.shape===', inputs_opt.shape) #[10, 32, 2560]
         self.opt_tokenizer.padding_side = "right"
 
         text = [t + "\n" for t in samples["text_input"]]
+        #每个batch sample后加换行符
+        #print(text)
 
         opt_tokens = self.opt_tokenizer(
             text,
             return_tensors="pt",
-            padding="longest",
+            padding="longest", #按最长的句子做padding
             truncation=True,
             max_length=self.max_txt_len,
         ).to(image.device)
@@ -138,18 +152,25 @@ class Blip2OPT(Blip2Base):
         targets = opt_tokens.input_ids.masked_fill(
             opt_tokens.input_ids == self.opt_tokenizer.pad_token_id, -100
         )
-        if self.prompt:
+
+        if self.prompt: #False
             targets[:, : self.prompt_length] = -100  # do not apply loss to the prompt
 
         empty_targets = (
             torch.ones(atts_opt.size(), dtype=torch.long).to(image.device).fill_(-100)
-        )
-        targets = torch.cat([empty_targets, targets], dim=1)
+        ) #[10, 32]
 
-        inputs_embeds = self.opt_model.model.decoder.embed_tokens(opt_tokens.input_ids)
-        inputs_embeds = torch.cat([inputs_opt, inputs_embeds], dim=1)
+        #前面query特征的label设为0，后面输入句子embed的label是inputs_id
+        targets = torch.cat([empty_targets, targets], dim=1) #[10, 55], 32+23(这个batch里最长的句子)
+        
+        inputs_embeds = self.opt_model.model.decoder.embed_tokens(opt_tokens.input_ids) #[10, 23, 2560]
+        #print('===inputs_embeds.shape===', inputs_embeds.shape)
+        # 将query输出过fc之后的特征和输入文本的embed拼接到一起作为输入
+        inputs_embeds = torch.cat([inputs_opt, inputs_embeds], dim=1) #[10, 55, 2560]
+        #print('===inputs_embeds-cat.shape===', inputs_embeds.shape)
         attention_mask = torch.cat([atts_opt, opt_tokens.attention_mask], dim=1)
 
+        # 输入query特征+文本embed, 输出预测句子的id
         with self.maybe_autocast():
             outputs = self.opt_model(
                 inputs_embeds=inputs_embeds,
@@ -157,6 +178,7 @@ class Blip2OPT(Blip2Base):
                 return_dict=True,
                 labels=targets,
             )
+
         loss = outputs.loss
 
         return {"loss": loss}

@@ -52,6 +52,10 @@ class BaseTask:
 
         for name in datasets_config:
             dataset_config = datasets_config[name]
+            # 注册器位置在LAVIS/lavis/datasets/builders/caption_builder.py
+            # 将配置文件中'coco_caption'和'COCOCapBuilder'关联起来
+            # COCOCapBuilder中指定了默认的数据集配置文件，以及训练评估对应的dataset class
+            # print(registry.get_builder_class(name))
 
             builder = registry.get_builder_class(name)(dataset_config)
             dataset = builder.build_datasets()

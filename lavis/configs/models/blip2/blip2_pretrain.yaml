@@ -20,7 +20,8 @@ model:
   # Q-Former
   num_query_token: 32
 
-
+# pretrain_stage1阶段，这部分没用到
+# LAVIS/lavis/models/base_model.py
 preprocess:
     vis_processor:
         train:

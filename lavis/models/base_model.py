@@ -94,7 +94,7 @@ class BaseModel(nn.Module):
             ), "Found load_finetuned is True, but finetune_path is None."
             self.load_checkpoint(url_or_filename=finetune_path)
         else:
-            load_pretrained = cfg.get("load_pretrained", True)
+            load_pretrained = cfg.get("load_pretrained", True) #NOTE: 默认是True
             if load_pretrained:
                 # load pre-trained weights
                 pretrain_path = cfg.get("pretrained", None)
