@@ -12,8 +12,6 @@
 # (1) Bert相关参考 https://zhuanlan.zhihu.com/p/147144376 下载, 在代码中通过路径指定
 # (2) 其它也都可以提前下载好，然后在配置文件中将链接改为存储路径。
 
-#export http_proxy=http://10.22.139.49:6666
-#export https_proxy=http://10.22.139.49:6666
 
 # 不开代理跑通过
 
